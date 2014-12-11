@@ -1,0 +1,195 @@
+require(["d3", "widgets/js/widget"], function(d3, WidgetManager){
+
+    var id = function(name){
+        return name + <%= uuid.to_s %>;
+    };
+
+    var init_svg = function(svg){
+        svg.attr("id", id("viz")).style({
+            position: 'relative',
+            width: 400,
+            height: 400
+        });
+
+        for(var i=0;i<=3;i++){
+            ["L", "R"].forEach(function(lr){
+                svg.append("line").attr({"id": id("L" + i + lr), "class": "bone"});
+            });
+        }
+        svg.append("line").attr({"id": id("L4"), "class": "bone"});
+        svg.append("line").attr({"id": id("GND"), "class": "bone"});
+        svg.selectAll("line").attr({
+            'stroke': "rgb(0,0,0)",
+            'stroke-width': 3
+        });
+    };
+
+    // q: [theta, x, y, zeta1, zeta2, zeta3, zeta4, zeta5, zeta6]
+    var draw = function(q){
+        var L1=0.122, L2=0.379, L3=0.420, L4=0.536, l4=0.332, l0=0.079;
+        var sin = Math.sin, cos = Math.cos, PI = Math.PI;
+        var height = 300, rate=150; // pixel
+        var s2px = function(x_val){return 200 + x_val*rate;}, //sim2pixel
+            s2py = function(y_val){return height - y_val*rate;};
+
+        // HAT
+        var theta = q[0], x = q[1], y = q[2];
+
+        var x4 = x - l4*cos(theta),
+            y4 = y - l4*sin(theta);
+
+        var x3 = x + (L4-l4)*cos(theta),
+            y3 = y + (L4-l4)*sin(theta);
+
+        d3.select(id("#GND")).attr({
+            x1: 0,
+            y1: s2py(0),
+            x2: 1000,
+            y2: s2py(0)
+        });
+
+        d3.select(id("#L4"))
+            .attr({
+                x1: s2px(x4),
+                y1: s2py(y4),
+                x2: s2px(x3),
+                y2: s2py(y3)
+            });
+
+        [['R', q.slice(2, 6)], ['L', q.slice(5, 9)]].forEach(function(arr){
+            var suffix = arr[0],
+                zeta = arr[1]; // R: q[3]->zeta[1], q[4]->zeta[2], q[5]->zeta[3]
+
+            var x2 = x3 + L3*sin(zeta[3]),
+                y2 = y3 - L3*cos(zeta[3]);
+
+            d3.select(id("#L3" + suffix))
+                .attr({
+                    x1: s2px(x3),
+                    y1: s2py(y3),
+                    x2: s2px(x2),
+                    y2: s2py(y2)
+                });
+
+            var x1 = x2 + L2*sin(zeta[2]+zeta[3]),
+                y1 = y2 - L2*cos(zeta[2]+zeta[3]);
+
+            d3.select(id("#L2" + suffix))
+                .attr({
+                    x1: s2px(x2),
+                    y1: s2py(y2),
+                    x2: s2px(x1),
+                    y2: s2py(y1)
+                });
+
+            var x0t = x1 + L1*sin(zeta[1]+zeta[2]+zeta[3]),
+                y0t = y1 - L1*cos(zeta[1]+zeta[2]+zeta[3]);
+
+            d3.select(id("#L1" + suffix))
+                .attr({
+                    x1: s2px(x1),
+                    y1: s2py(y1),
+                    x2: s2px(x0t),
+                    y2: s2py(y0t)
+                });
+
+            var x0h = x1 + l0*cos(zeta[1]+zeta[2]+zeta[3]),
+                y0h = y1 + l0*sin(zeta[1]+zeta[2]+zeta[3]);
+
+            d3.select(id("#L0" + suffix))
+                .attr({
+                    x1: s2px(x1),
+                    y1: s2py(y1),
+                    x2: s2px(x0h),
+                    y2: s2py(y0h)
+                });
+        });
+    };
+
+    // Define the DatePickerView
+    var SimView = IPython.DOMWidgetView.extend({
+        render: function(){
+            this.$el.attr('width', 700);
+            this.$el.attr('height', 700);
+        },
+
+        update: function() {
+            return SimView.__super__.update.apply(this);
+        },
+
+        initialize: function(parameters){
+            SimView.__super__.initialize.apply(this, [parameters]);
+
+            //*** init view ***
+            this.$el.addClass('widget-hbox');
+            // Create a svg.
+            var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg:svg");
+            this.$el.append(svg);
+            init_svg(d3.select(svg));
+
+            // params
+            var buff_size = <%= buffer_size %>;
+            var duration = 10; //ms
+            var thisObj =this;
+
+            // main loop. arr is ret value from p2
+            function main(arr){
+                var dfd = new $.Deferred();
+
+                var p2 = (function(){
+                    var deferred = new $.Deferred();
+
+                    var cnt = 0;
+                    var loop = function(){
+                        draw(arr[cnt]);
+
+                        if(cnt == buff_size-1){
+                            deferred.resolve(0);
+                        }else{
+                            cnt+=1;
+                            window.setTimeout(loop, duration);
+                        }
+                    };
+                    loop();
+
+                    return deferred.promise();
+                })();
+
+                var p1 = (function(){
+                    var deferred = new $.Deferred();
+
+                    // send custom message to IPython
+                    console.log("sending...", thisObj.model);
+                    thisObj.model.send({
+                        uuid: <%= uuid.to_s %>,
+                        num: buff_size
+                    });
+                    thisObj.model.on('msg:custom', $.proxy(function(content){
+                        if(content.error != true)
+                            deferred.resolve(content.new_arr);
+                        else
+                            deferred.reject();
+                    }), thisObj);
+
+                    return deferred.promise();
+                })();
+
+                $.when(p1, p2).then(
+                    main,
+                    function(err1, err2){
+                        //handling error
+                        console.log("Visualizer stopped.");
+                    }
+                );
+
+                dfd.resolve();
+                return dfd.promise();
+            }
+
+            main(<%= initial_arr %>);
+
+        }
+    });
+    
+    WidgetManager.register_widget_view('SimView', SimView);
+});
